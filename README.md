@@ -19,10 +19,3 @@
 1. [Deep Q-Learning](./src/dqn_ttb/README.md)
 2. [PPO](https://github.com/bjpublic/Reinforcement_learning)
 
-
-   <img src="./asset/permissionissetoexecutable.png">
-   </details>
-
-
-2. `catkin_make`와 `catkin build`를 혼동하였을 수 있습니다. ([참고 링크](https://catkin-tools.readthedocs.io/en/latest/migration.html))
-
