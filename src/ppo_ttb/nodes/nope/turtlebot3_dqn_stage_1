@@ -1,0 +1,254 @@
+#!/usr/bin/python3
+
+import rospy
+import os
+import json
+import numpy as np
+import random
+import time
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
+from collections import deque, namedtuple
+
+from std_msgs.msg import Float32MultiArray
+from src.turtlebot3_dqn.dqn_env import Env
+from src.turtlebot3_dqn.dqn_model import DQN
+from src.turtlebot3_dqn.dqn_memory import ReplayMemory
+# from environment_stage_1 import Env
+# from dqn_model import DQN
+# from dqn_memory import ReplayMemory
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+device = torch.device("cpu")
+# device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+EPISODES = 3000
+Transition = namedtuple('Transition',
+                        ('state', 'action', 'reward', 'next_state', 'done'))
+
+class ReinforceAgent():
+    def __init__(self, state_size, action_size):
+        self.pub_result = rospy.Publisher('result', Float32MultiArray, queue_size=5)
+        self.result = Float32MultiArray()
+        self.dirPath = os.path.dirname(os.path.realpath(__file__))
+        self.dirPath = self.dirPath.replace('dqn_ttb/nodes', 'dqn_ttb/save_model')
+
+        # self.load_model = True
+        self.load_episode = 0
+        self.episode_step = 6000
+        self.target_update = 2000
+        self.discount_factor = 0.99
+        self.learning_rate = 0.00025
+        self.epsilon = 1.0
+        self.epsilon_decay = 0.99
+        self.epsilon_min = 0.05
+        self.batch_size = 64
+        self.train_start = 64
+
+
+        self.state_size = state_size
+        self.action_size = action_size
+        self.policy_net = DQN(state_size, action_size).to(device)
+        self.target_net = DQN(state_size, action_size).to(device)
+        self.updateTargetNet()
+        self.optimizer = optim.RMSprop(self.policy_net.parameters(), lr=self.learning_rate, alpha=0.9, eps=1e-06)
+        self.memory = ReplayMemory(1000000)
+
+
+        # if self.load_model:
+        #     self.model.set_weights(load_model(self.dirPath+str(self.load_episode)+".h5").get_weights())
+
+        #     with open(self.dirPath+str(self.load_episode)+'.json') as outfile:
+        #         param = json.load(outfile)
+        #         self.epsilon = param.get('epsilon')
+
+    def updateTargetNet(self):
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+
+    def getAction(self, state):
+        state = state.reshape(1, len(state))
+        state_tensor = torch.from_numpy(state).float().to(device)
+
+        if np.random.rand() <= self.epsilon:
+            self.q_value = np.zeros(self.action_size)
+            return random.randrange(self.action_size)
+        
+        else:
+            with torch.no_grad():       # 이렇게 설계하지 않으면 추론이 느려짐 + 일관성 없음.
+                q_value = self.policy_net.forward(state_tensor)
+            self.q_value = q_value
+            return np.argmax(q_value[0])
+
+    # def buildModel(self):
+    #     model = Sequential()
+    #     dropout = 0.2
+
+    #     model.add(Dense(64, input_shape=(self.state_size,), activation='relu', kernel_initializer='lecun_uniform'))
+
+    #     model.add(Dense(64, activation='relu', kernel_initializer='lecun_uniform'))
+    #     model.add(Dropout(dropout))
+
+    #     model.add(Dense(self.action_size, kernel_initializer='lecun_uniform'))
+    #     model.add(Activation('linear'))
+    #     model.compile(loss='mse', optimizer=RMSprop(lr=self.learning_rate, rho=0.9, epsilon=1e-06))
+    #     model.summary()
+
+    #     return model
+
+    def getQvalue(self, reward, next_target, done):
+        if done:
+            return reward
+        else:
+            return reward + self.discount_factor * np.amax(next_target)
+        
+    def train(self, model, inputs, targets, optimizer):
+        inputs = torch.Tensor(inputs)
+        targets = torch.Tensor(targets)
+
+        outputs = model.forward(inputs)
+        loss = F.smooth_l1_loss(outputs, targets)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    def trainModel(self, target=False): #이거 target을 true로 하면 학습한대로 동작할듯.
+        transitions = agent.memory.sample(self.batch_size)
+        mini_batch = Transition(*zip(*transitions))
+        X_batch = np.empty((0, self.state_size), dtype=np.float64)
+        Y_batch = np.empty((0, self.action_size), dtype=np.float64)
+
+        for i in range(self.batch_size):
+            # try:
+            states = mini_batch.state[i]
+            states = torch.tensor(states, dtype=torch.float32).to(device)
+            actions = mini_batch.action[i]
+            rewards = mini_batch.reward[i]
+            next_states = mini_batch.next_state[i]
+            next_states = torch.tensor(next_states, dtype=torch.float32).to(device)
+            dones = mini_batch.done[i]
+            # rospy.loginfo("memory sample @ %d times", i)
+
+            # except:
+            #     rospy.loginfo("memory sample error @ %d times", i)
+            #     break
+
+            # q_value = self.policy_net(states.reshape(1, len(states)))
+            q_value = self.policy_net.forward(states.view(1, -1))
+            self.q_value = q_value
+
+            if target:
+                next_target = self.target_net.forward(next_states.view(1, -1))
+                next_target = next_target.detach().numpy()
+
+            else:
+                next_target = self.policy_net.forward(next_states.view(1, -1))
+                next_target = next_target.detach().numpy()
+
+            next_q_value = self.getQvalue(rewards, next_target, dones)
+
+            X_batch = np.append(X_batch, np.array([states.clone()]), axis=0)
+            Y_sample = q_value.clone().detach().numpy()
+
+            Y_sample[0][actions] = next_q_value
+            Y_batch = np.append(Y_batch, np.array([Y_sample[0]]), axis=0)
+
+            if dones:
+                X_batch = np.append(X_batch, np.array([next_states.clone()]), axis=0)
+                Y_batch = np.append(Y_batch, np.array([[rewards] * self.action_size]), axis=0)
+
+        # self.policy_net.fit(X_batch, Y_batch, batch_size=self.batch_size, epochs=1, verbose=0)
+        self.train(self.policy_net, X_batch, Y_batch, self.optimizer)
+
+if __name__ == '__main__':
+    rospy.init_node('turtlebot3_dqn_stage_1')
+    pub_result = rospy.Publisher('result', Float32MultiArray, queue_size=5)
+    pub_get_action = rospy.Publisher('get_action', Float32MultiArray, queue_size=5)
+    result = Float32MultiArray()
+    get_action = Float32MultiArray()
+
+    state_size = 26
+    action_size = 5
+
+    env = Env(action_size)
+
+    agent = ReinforceAgent(state_size, action_size)
+    scores, episodes = [], []
+    global_step = 0
+    start_time = time.time()
+
+    for e in range(agent.load_episode + 1, EPISODES):
+        done = False
+        state = env.reset()
+        score = 0
+        for t in range(agent.episode_step):
+            action = agent.getAction(state)
+
+            next_state, reward, done = env.step(action)
+
+            agent.memory.push(state, action, reward, next_state, done)
+            # rospy.loginfo("memory push @ %d times", t)
+            # rospy.loginfo("state: %d, next_state: %d", state, next_state)
+            # rospy.loginfo("action: %d, reward: %d, done: %d", action, reward, done)
+
+            if len(agent.memory) >= agent.train_start:
+                if global_step <= agent.target_update:
+                    agent.trainModel()
+                else:
+                    agent.trainModel(True)
+
+            score += reward
+            state = next_state
+            get_action.data = [action, score, reward]
+            pub_get_action.publish(get_action)
+
+            # if e % 10 == 0:
+            #     agent.model.save(agent.dirPath + str(e) + '.h5')
+            #     with open(agent.dirPath + str(e) + '.json', 'w') as outfile:
+            #         json.dump(param_dictionary, outfile)
+            if (e-1) % 10 == 0:     # 이래야 10번이 끝나고 저장됨.
+                save_path = agent.dirPath + '/stage_1_policy_net_' + str(e-1) + '.tar'
+                if not os.path.exists(save_path):
+                    try:
+                        # torch.save(agent.policy_net.state_dict(), agent.dirPath + 'policy_net_' + e + '.pt')
+                        torch.save({
+                            'epoch' : e,
+                            'model_state_dict' : agent.policy_net.state_dict(),
+                            'optimizer_state_dict' : agent.optimizer.state_dict(),
+                            'score' : score,
+                            }, save_path)
+                        rospy.loginfo("torch save success")
+                    except:
+                        rospy.loginfo("torch save error")
+                        pass
+                # with open(agent.dirPath + str(e) + '.json', 'w') as outfile:
+                #     json.dump(param_dictionary, outfile)
+
+            if t >= 500:
+                rospy.loginfo("Time out!!")
+                done = True
+
+            if done:
+                result.data = [score, np.max(agent.q_value.clone().detach().numpy())]
+                pub_result.publish(result)
+                agent.updateTargetNet()
+                scores.append(score)
+                episodes.append(e)
+                m, s = divmod(int(time.time() - start_time), 60)
+                h, m = divmod(m, 60)
+
+                rospy.loginfo('Ep: %d score: %.2f memory: %d epsilon: %.2f time: %d:%02d:%02d',
+                              e, score, len(agent.memory), agent.epsilon, h, m, s)
+                # param_keys = ['epsilon']
+                # param_values = [agent.epsilon]
+                # param_dictionary = dict(zip(param_keys, param_values))
+                break
+
+            global_step += 1
+            if global_step % agent.target_update == 0:
+                rospy.loginfo("UPDATE TARGET NETWORK")
+
+        if agent.epsilon > agent.epsilon_min:
+            agent.epsilon *= agent.epsilon_decay
