@@ -1,4 +1,4 @@
-# 1. Deep Q-Learning
+# 2. PPO 
 코드는 로보티즈의 [머신러닝 튜토리얼](https://emanual.robotis.com/docs/en/platform/turtlebot3/machine_learning/#machine-learning) 코드와 [PyTorch(한국 사용자) DQN 튜토리얼](https://tutorials.pytorch.kr/intermediate/reinforcement_q_learning.html)을 기반으로 만들어졌습니다.
 
 
